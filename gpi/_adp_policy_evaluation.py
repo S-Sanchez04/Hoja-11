@@ -36,16 +36,25 @@ class ADPPolicyEvaluation(TrialBasedPolicyEvaluator):
         )
         self.update_interval = update_interval
 
-        self.known_states = []
-        self.known_actions = []
+        self.state_vector = []
+        self.known_states = self.state_vector
+        self.action_vector = []
+        self.known_actions = self.action_vector
+        self.rewards = []
         self.reward_sums = {}
         self.reward_counts = {}
         self.transition_counts = {}
+        self.counts = self.transition_counts
+        self.prob_matrix = None
+        self.closed_form_mdp = None
         self.num_processed_trials = 0
+        self.steps_taken = 0
+        self.linear_evaluator = None
         self._linear_evaluator = None
 
         # Prefer the action space of the true MDP if available.
-        mdp_actions = getattr(self.trial_interface.mdp, "actions", None)
+        mdp = getattr(self.trial_interface, "mdp", None)
+        mdp_actions = getattr(mdp, "actions", None)
         if mdp_actions is not None:
             for a in mdp_actions:
                 if a not in self.known_actions:
@@ -68,15 +77,12 @@ class ADPPolicyEvaluation(TrialBasedPolicyEvaluator):
         if _has_action(a) and a not in self.transition_counts[s]:
             self.transition_counts[s][a] = {}
 
-    def get_believed_probs(self) -> dict:
-        """
-        :return: the 3-dim tensor where P[s,a,s'] is the *estimate* of P(s'|s,a) based on the current knowledge
-        """
+    def _get_believed_probs_dict(self) -> dict:
         probs = {}
-        for s in self.known_states:
+        for s in self.state_vector:
             probs[s] = {}
             s_action_counts = self.transition_counts.get(s, {})
-            for a in self.known_actions:
+            for a in self.action_vector:
                 next_state_counts = s_action_counts.get(a, {})
                 total = sum(next_state_counts.values())
                 if total <= 0:
@@ -88,7 +94,6 @@ class ADPPolicyEvaluation(TrialBasedPolicyEvaluator):
                     for sp, c in next_state_counts.items()
                 }
 
-                # Keep each posterior normalized after rounding.
                 if probs[s][a]:
                     current_sum = sum(probs[s][a].values())
                     if current_sum != 1.0:
@@ -99,33 +104,46 @@ class ADPPolicyEvaluation(TrialBasedPolicyEvaluator):
                         )
         return probs
 
-    def _rebuild_linear_evaluator(self):
-        states = list(self.known_states)
-        actions = list(self.known_actions)
-        n_states = len(states)
-        n_actions = len(actions)
-
-        prob_matrix = np.zeros((n_states, n_actions, n_states))
-        believed_probs = self.get_believed_probs()
+    def get_believed_probs(self) -> np.ndarray:
+        """
+        :return: the 3-dim tensor where P[s,a,s'] is the *estimate* of P(s'|s,a) based on the current knowledge
+        """
+        states = list(self.state_vector)
+        actions = list(self.action_vector)
+        prob_matrix = np.zeros((len(states), len(actions), len(states)))
+        probs = self._get_believed_probs_dict()
 
         for i, s in enumerate(states):
             for j, a in enumerate(actions):
-                for sp, p in believed_probs.get(s, {}).get(a, {}).items():
+                for sp, p in probs.get(s, {}).get(a, {}).items():
                     k = states.index(sp)
                     prob_matrix[i, j, k] = p
+        return prob_matrix
+
+    def _rebuild_linear_evaluator(self):
+        states = list(self.state_vector)
+        actions = list(self.action_vector)
+        n_states = len(states)
+        n_actions = len(actions)
+
+        prob_matrix = self.get_believed_probs()
+
+        self.prob_matrix = prob_matrix
 
         rewards = np.array(
             [self.reward_sums[s] / self.reward_counts[s] for s in states],
             dtype=float,
         )
+        self.rewards = list(rewards)
 
-        believed_mdp = ClosedFormMDP(
+        self.closed_form_mdp = ClosedFormMDP(
             states=states,
             actions=actions,
             prob_matrix=prob_matrix,
             rewards=rewards,
         )
-        self._linear_evaluator = LinearSystemEvaluator(mdp=believed_mdp, gamma=self.gamma)
+        self.linear_evaluator = LinearSystemEvaluator(mdp=self.closed_form_mdp, gamma=self.gamma)
+        self._linear_evaluator = self.linear_evaluator
 
     def process_trial_for_policy(self, df_trial, policy):
         """
@@ -136,6 +154,8 @@ class ADPPolicyEvaluation(TrialBasedPolicyEvaluator):
         states = list(df_trial["state"])
         actions = list(df_trial["action"])
         rewards = list(df_trial["reward"])
+
+        self.steps_taken += 1
 
         for i, (s, a, r) in enumerate(zip(states, actions, rewards)):
             self._synchronize_knowledge_about_states_and_actions(s, a, r)
@@ -156,7 +176,7 @@ class ADPPolicyEvaluation(TrialBasedPolicyEvaluator):
         )
 
         q_value_changes = {}
-        if should_update_values and self.known_states and self.known_actions:
+        if should_update_values and self.state_vector and self.action_vector:
             old_q = {} if self.workspace.q is None else self.workspace.q
 
             self._rebuild_linear_evaluator()

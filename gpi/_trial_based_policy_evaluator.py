@@ -68,25 +68,30 @@ class TrialBasedPolicyEvaluator(GeneralPolicyIterationComponent):
         return self.trial_interface.draw_init_state()
 
     def _generate_trial(self, policy):
-        s, r = self._draw_start_state()
+        sampled = self._draw_start_state()
+        if isinstance(sampled, tuple):
+            state, reward = sampled
+        else:
+            state, reward = sampled, np.nan
+
         rows = []
-        transition_steps = 0
-        mdp = self.trial_interface.mdp
-
+        steps = 0
         while True:
-            max_len_reached = transition_steps >= self.max_trial_length
-            is_terminal = mdp.is_terminal_state(s)
-
-            if is_terminal or max_len_reached:
-                rows.append([None, s, r])
+            actions = self.trial_interface.get_actions_in_state(state)
+            if not actions or steps >= int(self.max_trial_length):
+                rows.append([state, None, reward])
                 break
 
-            a = policy(s)
-            rows.append([a, s, r])
-            s, r = self.trial_interface.exec_action(s, a)
-            transition_steps += 1
+            if self.exploring_starts and steps == 0:
+                action = actions[self.random_state.choice(range(len(actions)))]
+            else:
+                action = policy(state)
 
-        return pd.DataFrame(rows, columns=["action", "state", "reward"])
+            rows.append([state, action, reward])
+            state, reward = self.trial_interface.exec_action(state, action)
+            steps += 1
+
+        return pd.DataFrame(rows, columns=["state", "action", "reward"])
 
     def step(self):
         if self.workspace is None:
@@ -95,18 +100,24 @@ class TrialBasedPolicyEvaluator(GeneralPolicyIterationComponent):
             raise RuntimeError("No policy in workspace. Set workspace.policy before step().")
 
         df_trial = self._generate_trial(self.workspace.policy)
+        self.last_trial = df_trial
         process_report = self.process_trial_for_policy(df_trial, self.workspace.policy)
 
         report = {
-            "trial_length": int(df_trial["action"].notna().sum()),
+            "trial_length": int(len(df_trial)),
             "num_visited_states": int(len(df_trial)),
             "exploring_starts": bool(self.exploring_starts),
             "max_trial_length": None if np.isinf(self.max_trial_length) else int(self.max_trial_length),
-            "max_trial_length_reached": bool(df_trial["action"].notna().sum() >= self.max_trial_length)
+            "max_trial_length_reached": bool(len(df_trial) >= self.max_trial_length)
             if not np.isinf(self.max_trial_length)
             else False,
-            "process_report": process_report,
+            "processed": True,
         }
+        if isinstance(process_report, dict):
+            report.update(process_report)
+            report["process_report"] = process_report
+        else:
+            report["process_report"] = process_report
         return report
 
     @abstractmethod

@@ -3,15 +3,8 @@ from mdp._mdp_utils import get_policy_from_dict
 from policy_iteration._standard import StandardPolicyIteration
 from policy_evaluation._linear import LinearSystemEvaluator
 from policy_improvement._standard import StandardPolicyImprover
-from mdp._trial_interface import TrialInterface
-from gpi._base import GeneralPolicyIteration
-from gpi._first_visit_monte_carlo_evaluator import FirstVisitMCEvaluator
-from gpi._adp_policy_evaluation import ADPEvaluator
-from lake import LakeMDP
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
-import os
 
 
 class Analyzer:
@@ -158,97 +151,3 @@ class Analyzer:
 
     def get_trial_lengths(self, approach_name):
         pass
-
-
-def _run_evaluator_only_gpi_for_errors(
-    gamma,
-    evaluator,
-    optimal_policy,
-    true_v,
-    non_terminal_states,
-    iterations,
-):
-    gpi = GeneralPolicyIteration(gamma=gamma, components=[evaluator])
-    gpi.workspace.replace_policy(optimal_policy)
-
-    column_names = [str(s) for s in non_terminal_states]
-    rows = []
-    for _ in range(iterations):
-        gpi.step()
-        v_est = evaluator.v
-        row = [float(np.abs(v_est.get(s, 0.0) - true_v[s])) for s in non_terminal_states]
-        rows.append(row)
-    return pd.DataFrame(rows, columns=column_names)
-
-
-def run_task2_lake_value_error_experiment(
-    iterations=10**5,
-    gamma=0.95,
-    max_trial_length=np.inf,
-    adp_update_interval=10,
-    output_dir="task2_value_errors",
-    seed=0,
-):
-    mdp = LakeMDP()
-
-    policy_evaluator = LinearSystemEvaluator(mdp=mdp, gamma=gamma)
-    policy_iteration = StandardPolicyIteration(
-        init_policy=get_random_policy(mdp=mdp, seed=seed),
-        policy_evaluator=policy_evaluator,
-        policy_improver=StandardPolicyImprover(),
-    )
-    policy_iteration.run()
-    optimal_policy = policy_iteration.policy_improver.policy
-
-    policy_evaluator.reset(optimal_policy)
-    true_v = policy_evaluator.v.copy()
-    non_terminal_states = [s for s in mdp.states if not mdp.is_terminal_state(s)]
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    runs = [
-        (
-            "first_visit_exploring_starts_off",
-            FirstVisitMCEvaluator,
-            {"exploring_starts": False},
-        ),
-        (
-            "first_visit_exploring_starts_on",
-            FirstVisitMCEvaluator,
-            {"exploring_starts": True},
-        ),
-        (
-            "adp_exploring_starts_off",
-            ADPEvaluator,
-            {"exploring_starts": False, "update_interval": adp_update_interval},
-        ),
-        (
-            "adp_exploring_starts_on",
-            ADPEvaluator,
-            {"exploring_starts": True, "update_interval": adp_update_interval},
-        ),
-    ]
-
-    output_paths = {}
-    for i, (name, evaluator_cls, kwargs) in enumerate(runs):
-        trial_interface = TrialInterface(mdp=mdp, seed=seed + i + 1)
-        evaluator = evaluator_cls(
-            trial_interface=trial_interface,
-            gamma=gamma,
-            max_trial_length=max_trial_length,
-            random_state=np.random.RandomState(seed + 100 + i),
-            **kwargs,
-        )
-        df = _run_evaluator_only_gpi_for_errors(
-            gamma=gamma,
-            evaluator=evaluator,
-            optimal_policy=optimal_policy,
-            true_v=true_v,
-            non_terminal_states=non_terminal_states,
-            iterations=iterations,
-        )
-        csv_path = os.path.join(output_dir, f"{name}.csv")
-        df.to_csv(csv_path, index=False)
-        output_paths[name] = csv_path
-
-    return output_paths

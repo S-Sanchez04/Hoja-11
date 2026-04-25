@@ -23,6 +23,7 @@ class FirstVisitMonteCarloEvaluator(TrialBasedPolicyEvaluator):
         )
         self.returns_sum = {}
         self.returns_count = {}
+        self.counts = {}
 
     @staticmethod
     def _has_action(action):
@@ -73,6 +74,7 @@ class FirstVisitMonteCarloEvaluator(TrialBasedPolicyEvaluator):
 
             self.returns_sum[s][a] += g_t
             self.returns_count[s][a] += 1
+            self.counts[(s, a)] = self.counts.get((s, a), 0) + 1
             new_q = self.returns_sum[s][a] / self.returns_count[s][a]
 
             if s not in q_values:
@@ -88,6 +90,21 @@ class FirstVisitMonteCarloEvaluator(TrialBasedPolicyEvaluator):
             updates += 1
 
         self.workspace.replace_q(q_values)
+
+        v_values = {}
+        for s, by_action in q_values.items():
+            if not by_action:
+                continue
+            try:
+                a_policy = policy(s)
+                if a_policy in by_action:
+                    v_values[s] = float(by_action[a_policy])
+                else:
+                    v_values[s] = float(max(by_action.values()))
+            except Exception:
+                v_values[s] = float(max(by_action.values()))
+        self.workspace.replace_v(v_values)
+
         return {
             "updated_q_pairs": updates,
             "num_first_visits_in_trial": len(seen_pairs),
